@@ -206,9 +206,29 @@ def normalize_pdf_markdown(markdown: str) -> str:
     trailing_newline = markdown.endswith("\n")
     normalized = _convert_html_tables(markdown)
     normalized = _normalize_pdf_headings(normalized)
+    normalized = _ensure_table_spacing(normalized)
     if trailing_newline and not normalized.endswith("\n"):
         return normalized + "\n"
     return normalized
+
+
+def _ensure_table_spacing(markdown: str) -> str:
+    """GFM tables must be separated from surrounding paragraphs by a blank line."""
+    lines = markdown.splitlines()
+    output: list[str] = []
+    in_code_fence = False
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith(CODE_FENCE_PREFIXES):
+            in_code_fence = not in_code_fence
+        is_table_row = not in_code_fence and stripped.startswith("|")
+        if is_table_row and output and output[-1].strip() and not output[-1].strip().startswith("|"):
+            output.append("")
+        output.append(line)
+        next_line = lines[index + 1].strip() if index + 1 < len(lines) else ""
+        if is_table_row and next_line and not next_line.startswith("|"):
+            output.append("")
+    return "\n".join(output)
 
 
 def _convert_html_tables(markdown: str) -> str:

@@ -287,6 +287,22 @@ class PdfToMarkdownTests(unittest.TestCase):
         self.assertIn("## 3. 参考文献", normalized)
 
 
+    def test_normalize_pdf_markdown_separates_tables_from_paragraphs(self):
+        module = load_module()
+
+        markdown = (
+            "Table 1-1 分支预测\n"
+            "| Type | Strategy |\n"
+            "| --- | --- |\n"
+            "| B type | Taken |\n"
+            "后续说明。\n"
+        )
+
+        normalized = module.normalize_pdf_markdown(markdown)
+
+        self.assertIn("Table 1-1 分支预测\n\n| Type | Strategy |", normalized)
+        self.assertIn("| B type | Taken |\n\n后续说明。", normalized)
+
 
 if __name__ == "__main__":
     unittest.main()
