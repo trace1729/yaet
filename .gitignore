@@ -8,3 +8,6 @@ output/
 .vscode/
 .epub_image_cache/
 docs/
+epub-translator/
+Free-Markdown-Translator/
+venv

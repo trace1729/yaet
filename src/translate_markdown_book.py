@@ -30,6 +30,8 @@ GLOSSARY = {
     "plato": "柏拉图",
 }
 
+DEFAULT_CLIENT_TIMEOUT = 60.0
+
 
 @dataclass(frozen=True)
 class Block:
@@ -49,10 +51,34 @@ class ProtectedSpan:
 
 
 @dataclass(frozen=True)
+class MarkdownSkipPattern:
+    name: str
+    regex: re.Pattern[str]
+
+
+@dataclass(frozen=True)
 class FrontMatterData:
     raw: str
     body: str
     line_count: int
+
+
+MARKDOWN_SKIP_PATTERNS: tuple[MarkdownSkipPattern, ...] = (
+    MarkdownSkipPattern("code_fence", re.compile(r"(?ms)^(?:```|~~~)[^\n]*\n.*?^(?:```|~~~)[ \t]*$")),
+    MarkdownSkipPattern("image", re.compile(r"!\[[^\]\n]*\]\([^)\n]*\)")),
+    MarkdownSkipPattern("link", re.compile(r"(?<!!)\[[^\]\n]*\]\([^)\n]*\)")),
+    MarkdownSkipPattern("code", re.compile(r"`[^`\n]+`")),
+    MarkdownSkipPattern("html", re.compile(r"</?[^>\n]+?>")),
+    MarkdownSkipPattern("url", re.compile(r"https?://[^\s)>]+")),
+)
+
+MARKDOWN_MARKER_PATTERNS: tuple[MarkdownSkipPattern, ...] = (
+    MarkdownSkipPattern("md", re.compile(r"(?m)^(#{1,6}\s+)")),
+    MarkdownSkipPattern("md", re.compile(r"(?m)^((?:>\s?)+)")),
+    MarkdownSkipPattern("md", re.compile(r"(?m)^(\s*(?:[-+*]|\d+\.)\s+)")),
+)
+
+PROTECTED_PLACEHOLDER_PATTERN = re.compile(r"\{\{[A-Z_0-9]+\}\}")
 
 
 class TranslationCache:
@@ -79,7 +105,7 @@ class TranslationCache:
 
 def parse_blocks(source: str, parser_backend: str = "yaet") -> List[Block]:
     if parser_backend == "yaet":
-        return _parse_standard_blocks(source)
+        return _protect_translatable_blocks(_parse_standard_blocks(source))
     if parser_backend == "free_markdown_translator":
         return _parse_free_markdown_blocks(source)
     raise ValueError(f"Unsupported markdown parser backend: {parser_backend}")
@@ -117,6 +143,11 @@ def _parse_standard_blocks(source: str) -> List[Block]:
             blocks.append(Block(kind="code_fence", text="\n".join(code_lines), translatable=False))
             continue
 
+        if _is_standalone_markdown_skip_line(line):
+            blocks.append(Block(kind="markdown", text=line, translatable=False))
+            index += 1
+            continue
+
         if line.startswith("#"):
             blocks.append(Block(kind="heading", text=line, translatable=True))
             index += 1
@@ -148,6 +179,8 @@ def _parse_standard_blocks(source: str) -> List[Block]:
                 break
             if current.startswith(("```", "~~~", "#", ">")) or _is_list_line(current):
                 break
+            if _is_standalone_markdown_skip_line(current):
+                break
             if current.strip() in {"---", "***", "___"}:
                 break
             paragraph_lines.append(current)
@@ -157,6 +190,16 @@ def _parse_standard_blocks(source: str) -> List[Block]:
     return blocks
 
 
+def _protect_translatable_blocks(blocks: Sequence[Block]) -> List[Block]:
+    protected_blocks: List[Block] = []
+    for block in blocks:
+        if block.translatable:
+            protected_blocks.append(_protect_markdown_block(block))
+        else:
+            protected_blocks.append(block)
+    return protected_blocks
+
+
 def _parse_free_markdown_blocks(source: str) -> List[Block]:
     front_matter = split_front_matter(source)
     blocks: List[Block] = []
@@ -164,11 +207,7 @@ def _parse_free_markdown_blocks(source: str) -> List[Block]:
     if front_matter.line_count:
         blocks.append(Block(kind="front_matter", text=front_matter.raw, translatable=False))
 
-    for block in _parse_standard_blocks(front_matter.body):
-        if block.translatable:
-            blocks.append(_protect_markdown_block(block))
-        else:
-            blocks.append(block)
+    blocks.extend(_protect_translatable_blocks(_parse_standard_blocks(front_matter.body)))
     return blocks
 
 
@@ -189,6 +228,37 @@ def split_front_matter(source: str) -> FrontMatterData:
     return FrontMatterData(raw="", body=source, line_count=0)
 
 
+def _replace_protected_patterns(
+    text: str,
+    patterns: Sequence[MarkdownSkipPattern],
+    store: Callable[[str, str], str],
+) -> str:
+    matches: list[tuple[int, int, str]] = []
+    occupied: list[tuple[int, int]] = []
+
+    for pattern in patterns:
+        for match in pattern.regex.finditer(text):
+            start, end = match.span()
+            if start == end:
+                continue
+            if any(start < existing_end and existing_start < end for existing_start, existing_end in occupied):
+                continue
+            matches.append((start, end, pattern.name))
+            occupied.append((start, end))
+
+    if not matches:
+        return text
+
+    output: list[str] = []
+    last_index = 0
+    for start, end, span_type in sorted(matches):
+        output.append(text[last_index:start])
+        output.append(store(text[start:end], span_type))
+        last_index = end
+    output.append(text[last_index:])
+    return "".join(output)
+
+
 def _protect_markdown_block(block: Block) -> Block:
     text = block.text
     spans: list[ProtectedSpan] = []
@@ -198,17 +268,9 @@ def _protect_markdown_block(block: Block) -> Block:
         spans.append(ProtectedSpan(placeholder=placeholder, original_text=value, span_type=span_type))
         return placeholder
 
-    text = re.sub(r"(?m)^(#{1,6}\s+)", lambda match: store(match.group(1), "md"), text)
-    text = re.sub(r"(?m)^((?:>\s?)+)", lambda match: store(match.group(1), "md"), text)
-    text = re.sub(r"(?m)^(\s*(?:[-+*]|\d+\.)\s+)", lambda match: store(match.group(1), "md"), text)
-    text = re.sub(r"`[^`\n]+`", lambda match: store(match.group(0), "code"), text)
-    text = re.sub(r"</?[^>\n]+?>", lambda match: store(match.group(0), "html"), text)
-    text = re.sub(
-        r"(!?\[[^\]]*]\()([^)]+)(\))",
-        lambda match: f"{match.group(1)}{store(match.group(2), 'url')}{match.group(3)}",
-        text,
-    )
-    text = re.sub(r"https?://[^\s)>]+", lambda match: store(match.group(0), "url"), text)
+    text = _replace_protected_patterns(text, MARKDOWN_SKIP_PATTERNS, store)
+    for pattern in MARKDOWN_MARKER_PATTERNS:
+        text = pattern.regex.sub(lambda match, span_type=pattern.name: store(match.group(1), span_type), text)
 
     return Block(
         kind=block.kind,
@@ -228,8 +290,12 @@ def restore_translation_text(block: Block, translated_text: str) -> str:
     leading_placeholders = re.match(r"^(?:\{\{[A-Z_0-9]+\}\})+", block.prompt_text or "")
     if leading_placeholders:
         prefix = leading_placeholders.group(0)
-        restored = re.sub(r"^(?:\{\{[A-Z_0-9]+\}\})+", "", restored)
-        restored = prefix + restored.replace(prefix, "")
+        leading_spans = [span for span in block.protected_spans if span.placeholder in prefix]
+        translated_without_placeholders = PROTECTED_PLACEHOLDER_PATTERN.sub("", restored).lstrip()
+        original_prefix = "".join(span.original_text for span in leading_spans)
+        if not translated_without_placeholders.startswith(original_prefix):
+            restored = PROTECTED_PLACEHOLDER_PATTERN.sub("", restored, count=len(leading_spans))
+            restored = prefix + restored.replace(prefix, "")
 
     for span in block.protected_spans:
         restored = restored.replace(span.placeholder, span.original_text)
@@ -248,13 +314,30 @@ def _is_indented_continuation(line: str) -> bool:
     return bool(line) and line[:1].isspace()
 
 
+def _is_standalone_markdown_skip_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    return any(
+        pattern.name in {"image", "link"} and pattern.regex.fullmatch(stripped)
+        for pattern in MARKDOWN_SKIP_PATTERNS
+    )
+
+
+def _has_translatable_text(block: Block) -> bool:
+    if not block.translatable:
+        return False
+    candidate = block.prompt_text if block.prompt_text is not None else block.text
+    return bool(PROTECTED_PLACEHOLDER_PATTERN.sub("", candidate).strip())
+
+
 def batch_block_indexes(blocks: Sequence[Block], max_chars_per_chunk: int) -> List[List[int]]:
     batches: List[List[int]] = []
     current_batch: List[int] = []
     current_size = 0
 
     for index, block in enumerate(blocks):
-        if not block.translatable:
+        if not _has_translatable_text(block):
             continue
 
         block_size = len(block.prompt_text or block.text)
@@ -386,7 +469,12 @@ def build_messages(
 
 def _parse_translation_items(content: str, expected_count: int) -> List[str]:
     payload = json.loads(content)
-    items = payload["translations"]
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        items = payload["translations"]
+    else:
+        raise ValueError("DeepSeek returned malformed translation payload")
     ordered: Dict[int, str] = {}
 
     for item in items:
@@ -475,13 +563,13 @@ def translate_batch(
     raise RuntimeError(f"Translation failed after {retries} attempts") from last_error
 
 
-def create_client(api_key: str, base_url: str = "https://api.deepseek.com"):
+def create_client(api_key: str, base_url: str = "https://api.deepseek.com", timeout: float = DEFAULT_CLIENT_TIMEOUT):
     try:
         from openai import OpenAI
     except ImportError as error:  # pragma: no cover - depends on environment
         raise RuntimeError("Missing dependency: install `openai` first") from error
 
-    return OpenAI(api_key=api_key, base_url=base_url)
+    return OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
 
 
 def load_api_key(env_path: Path | None = None, env_var: str = "DEEPSEEK_API_KEY") -> str | None:

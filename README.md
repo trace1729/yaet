@@ -77,7 +77,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ./yaet epub2md "/path/to/book.epub" --epub-parser-backend epub_translator
 ./yaet md2md "/path/to/book.md"
 ./yaet md2md "/path/to/book.md" --translate --bilingual --max-workers 16
-./yaet md2md "/path/to/book.md" --translate --markdown-parser-backend free_markdown_translator
+./yaet md2md "/path/to/book.md" --translatefree_markdown_translator
 ./yaet pdf2epub "/path/to/paper.pdf"
 ./yaet pdf2epub "/path/to/paper.pdf" --translate --bilingual --max-workers 16
 ./yaet epub2epub "/path/to/book.epub" --max-workers 16

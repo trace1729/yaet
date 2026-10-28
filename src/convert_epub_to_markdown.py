@@ -356,7 +356,7 @@ def render_block(
         toc_entries.append(TocEntry(level=heading_level, title=title, anchor=anchor))
         return [f"{'#' * heading_level} {title}"]
 
-    if tag in {"section", "article", "div", "main", "body"}:
+    if tag in {"section", "article", "div", "main", "body", "table", "thead", "tbody", "tfoot", "tr", "td", "th"}:
         return render_blocks(
             list(element),
             document_href,

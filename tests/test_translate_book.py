@@ -31,9 +31,11 @@ from translate_markdown_book import (
     batch_block_indexes,
     block_cache_key,
     build_messages,
+    create_client,
     load_api_key,
     parse_blocks,
     reconstruct_markdown,
+    restore_translation_text,
     run_translation_pipeline,
     translate_batch,
 )
@@ -83,7 +85,41 @@ class ParseAndReconstructTests(unittest.TestCase):
         self.assertEqual(blocks[2].text, "# Title")
         self.assertIn("{{MD_0}}", blocks[2].prompt_text or "")
         self.assertIn("{{CODE_0}}", blocks[4].prompt_text or "")
-        self.assertIn("{{URL_", blocks[4].prompt_text or "")
+        self.assertIn("{{LINK_", blocks[4].prompt_text or "")
+
+    def test_parse_blocks_protects_complete_markdown_constructs_with_default_backend(self):
+        source = (
+            "# Title\n"
+            "\n"
+            "See [the docs](https://example.com/docs) and ![diagram](assets/figure.png).\n"
+            "\n"
+            "Keep `inline_code()` unchanged.\n"
+        )
+
+        blocks = parse_blocks(source)
+        prompt_texts = "\n".join(block.prompt_text or "" for block in blocks if block.translatable)
+
+        self.assertNotIn("[the docs](https://example.com/docs)", prompt_texts)
+        self.assertNotIn("![diagram](assets/figure.png)", prompt_texts)
+        self.assertNotIn("`inline_code()`", prompt_texts)
+        self.assertIn("See", prompt_texts)
+        self.assertIn("Keep", prompt_texts)
+
+        link_block = next(block for block in blocks if "See [the docs]" in block.text)
+        restored = restore_translation_text(link_block, "参见 {{LINK_0}} 和 {{IMAGE_1}}。")
+        self.assertEqual(restored, "参见 [the docs](https://example.com/docs) 和 ![diagram](assets/figure.png)。")
+
+    def test_unix_markdown_fixture_skips_images_and_code_in_translation_payload(self):
+        fixture = PROJECT_ROOT / "output" / "Specification_of_the_UNIX_Filing_System" / "Specification_of_the_UNIX_Filing_System.md"
+        source = fixture.read_text(encoding="utf-8")
+
+        blocks = parse_blocks(source)
+        prompt_payload = "\n".join(block.prompt_text or block.text for block in blocks if block.translatable)
+
+        self.assertNotIn("![](Specification_of_the_UNIX_Filing_System_assets/", prompt_payload)
+        self.assertNotIn("```lisp", prompt_payload)
+        self.assertNotIn("(file sucoffset)(n) =", prompt_payload)
+        self.assertIn("Specification of the UNIX Filing System", prompt_payload)
 
     def test_reconstruct_markdown_inserts_translation_after_original_in_bilingual_mode(self):
         blocks = [
@@ -124,6 +160,17 @@ class BatchAndCacheTests(unittest.TestCase):
         batches = batch_block_indexes(blocks, max_chars_per_chunk=8)
 
         self.assertEqual(batches, [[0], [1], [3]])
+
+    def test_build_batches_skips_blocks_that_only_contain_protected_markdown(self):
+        blocks = parse_blocks("![](assets/figure.png)\n\nCaption text.\n")
+
+        batches = batch_block_indexes(blocks, max_chars_per_chunk=1000)
+
+        self.assertEqual(batches, [[2]])
+        self.assertFalse(blocks[0].translatable)
+
+        output = reconstruct_markdown(blocks, {2: "图注。"}, output_mode="bilingual")
+        self.assertEqual(output.count("![](assets/figure.png)"), 1)
 
     def test_translation_cache_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -177,6 +224,16 @@ class ApiFlowTests(unittest.TestCase):
 
         self.assertEqual(result, ["甲", "乙"])
 
+    def test_translate_batch_accepts_top_level_translation_array(self):
+        client = Mock()
+        client.chat.completions.create.return_value = Mock(
+            choices=[Mock(message=Mock(content='[{"id": 0, "text": "甲"}, {"id": 1, "text": "乙"}]'))]
+        )
+
+        result = translate_batch(client, ["first", "second"], model="deepseek-chat")
+
+        self.assertEqual(result, ["甲", "乙"])
+
     def test_translate_batch_recovers_by_splitting_when_batch_count_mismatches(self):
         client = Mock()
         client.chat.completions.create.side_effect = [
@@ -193,6 +250,17 @@ class ApiFlowTests(unittest.TestCase):
 
         self.assertEqual(result, ["甲", "乙"])
         self.assertEqual(client.chat.completions.create.call_count, 3)
+
+    def test_create_client_sets_default_timeout(self):
+        openai_module = Mock(OpenAI=Mock())
+        with patch.dict("sys.modules", {"openai": openai_module}):
+            create_client("secret")
+
+        openai_module.OpenAI.assert_called_once_with(
+            api_key="secret",
+            base_url="https://api.deepseek.com",
+            timeout=60.0,
+        )
 
 
 class PipelineTests(unittest.TestCase):
