@@ -15,6 +15,7 @@ def resolve_dotenv_path(module_file: str, env_path: Path | None = None) -> Path 
     candidates: list[Path] = []
     candidates.append(Path(".env"))
     candidates.append(project_root_from_file(module_file) / ".env")
+    candidates.append(Path.home() / ".env")
 
     seen: set[Path] = set()
     for candidate in candidates:

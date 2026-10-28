@@ -44,6 +44,7 @@ IMAGE_SUFFIXES = {
 HEADING_PATTERN = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<title>\S.*)$")
 SECTION_NUMBER_PATTERN = re.compile(r"^(?P<number>\d+(?:\.\d+)*)\.?(?:\s+|$)(?P<title>.*)$")
 BODY_HEADING_ENDING_PATTERN = re.compile(r"[:：。！？!?；;，,]\s*$")
+CHINESE_SECTION_HEADING_PATTERN = re.compile(r"^#{1,6}\s*[一二三四五六七八九十]+、")
 HTML_TABLE_PATTERN = re.compile(r"<table\b[^>]*>.*?</table>", re.IGNORECASE | re.DOTALL)
 MAX_BODY_HEADING_LENGTH = 80
 CODE_FENCE_PREFIXES = ("```", "~~~")
@@ -358,8 +359,14 @@ def _normalize_pdf_headings(markdown: str) -> str:
     in_code_fence = False
     expect_numbered_list = False
     in_numbered_list = False
+    chinese_toplevel = _uses_chinese_section_numbers(lines)
+    next_dotted_numbers = _next_dotted_numbers(lines)
+    last_level = 1
+    last_bare_section: int | None = None
+    last_dotted_root: str | None = None
+    previous_emitted_is_heading = False
 
-    for line in lines:
+    for index, line in enumerate(lines):
         stripped = line.strip()
         if stripped.startswith(CODE_FENCE_PREFIXES):
             in_code_fence = not in_code_fence
@@ -375,6 +382,7 @@ def _normalize_pdf_headings(markdown: str) -> str:
             if stripped:
                 expect_numbered_list = _ends_with_intro_punctuation(stripped)
                 in_numbered_list = False
+                previous_emitted_is_heading = False
             normalized.append(line)
             continue
 
@@ -382,39 +390,145 @@ def _normalize_pdf_headings(markdown: str) -> str:
         title = heading_match.group("title").strip()
         if len(hashes) == 1:
             in_numbered_list = False
+            last_level = 1
+            previous_emitted_is_heading = True
             normalized.append(line)
             continue
 
         section_match = SECTION_NUMBER_PATTERN.match(title)
         if section_match is None:
+            in_numbered_list = False
             if _looks_like_body_heading(title):
                 normalized.append(title)
                 expect_numbered_list = _ends_with_intro_punctuation(title)
-                in_numbered_list = False
+                previous_emitted_is_heading = False
             else:
                 normalized.append(line)
-                in_numbered_list = False
+                expect_numbered_list = False
+                last_level = len(hashes)
+                previous_emitted_is_heading = True
             continue
 
         number = section_match.group("number")
+        level = _section_level(number, chinese_toplevel)
+
         if "." in number:
-            level = min(6, 2 + number.count("."))
             normalized.append(f"{'#' * level} {title}")
             expect_numbered_list = False
             in_numbered_list = False
+            last_level = level
+            last_dotted_root = number.split(".", 1)[0]
+            previous_emitted_is_heading = True
+            if level <= 2:
+                last_bare_section = None
             continue
 
-        if _looks_like_body_heading(title) or in_numbered_list or expect_numbered_list:
+        is_section = _bare_number_is_section(
+            number=int(number),
+            level=level,
+            last_level=last_level,
+            previous_emitted_is_heading=previous_emitted_is_heading,
+            next_dotted=next_dotted_numbers[index],
+            last_bare_section=last_bare_section,
+            last_dotted_root=last_dotted_root,
+        )
+        if (
+            not is_section
+            or _looks_like_body_heading(title)
+            or in_numbered_list
+            or expect_numbered_list
+        ):
             normalized.append(title)
             in_numbered_list = True
             expect_numbered_list = False
+            previous_emitted_is_heading = False
             continue
 
-        normalized.append(f"## {title}")
+        normalized.append(f"{'#' * level} {title}")
         in_numbered_list = False
         expect_numbered_list = False
+        last_level = level
+        previous_emitted_is_heading = True
+        last_bare_section = int(number)
 
     return "\n".join(normalized)
+
+
+def _section_level(number: str, chinese_toplevel: bool) -> int:
+    """Level for a numbered heading; 一、/二、 documents push numbering one level down."""
+    dots = number.count(".")
+    if chinese_toplevel:
+        return min(6, 2 + max(dots, 1))
+    return min(6, 2 + dots)
+
+
+def _bare_number_is_section(
+    *,
+    number: int,
+    level: int,
+    last_level: int,
+    previous_emitted_is_heading: bool,
+    next_dotted: str | None,
+    last_bare_section: int | None,
+    last_dotted_root: str | None,
+) -> bool:
+    """Decide whether a bare ``N.`` heading is a real section instead of a list item.
+
+    Numbering alone is ambiguous: ``1.`` can open a chapter or enumerate a list.
+    Context is checked in this order:
+    1. it deepens the hierarchy,
+    2. it directly follows another heading (``二、`` then ``1.``),
+    3. a later heading uses it as a prefix (``2.`` then ``2.1``) and the candidate
+       is not just repeating the chapter that is already open,
+    4. a later heading continues the previous section (``1.3`` after ``2.``) -> list item,
+    5. it continues the sequence of accepted sections (``3.`` after ``2.``).
+    """
+    if level > last_level:
+        return True
+    if previous_emitted_is_heading:
+        return True
+    if next_dotted:
+        opens_new_number = last_dotted_root is None or str(number) != last_dotted_root
+        if opens_new_number and next_dotted.startswith(f"{number}."):
+            return True
+        if last_bare_section is not None and next_dotted.startswith(f"{last_bare_section}."):
+            return False
+    if last_bare_section is not None and number == last_bare_section + 1:
+        return True
+    return False
+
+
+def _uses_chinese_section_numbers(lines: Sequence[str]) -> bool:
+    """True when the document is outlined with 一、二、 instead of 1./1.1."""
+    hits = 0
+    in_code_fence = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(CODE_FENCE_PREFIXES):
+            in_code_fence = not in_code_fence
+            continue
+        if in_code_fence:
+            continue
+        if CHINESE_SECTION_HEADING_PATTERN.match(stripped):
+            hits += 1
+            if hits >= 2:
+                return True
+    return False
+
+
+def _next_dotted_numbers(lines: Sequence[str]) -> list[str | None]:
+    """For every line, the number of the next ``N.M`` heading (or None)."""
+    pending: list[str | None] = [None] * len(lines)
+    upcoming: str | None = None
+    for index in range(len(lines) - 1, -1, -1):
+        pending[index] = upcoming
+        match = HEADING_PATTERN.match(lines[index].strip())
+        if match is None:
+            continue
+        section_match = SECTION_NUMBER_PATTERN.match(match.group("title").strip())
+        if section_match is not None and "." in section_match.group("number"):
+            upcoming = section_match.group("number")
+    return pending
 
 
 def _ends_with_intro_punctuation(text: str) -> bool:

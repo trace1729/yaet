@@ -111,6 +111,10 @@ class ParseAndReconstructTests(unittest.TestCase):
 
     def test_unix_markdown_fixture_skips_images_and_code_in_translation_payload(self):
         fixture = PROJECT_ROOT / "output" / "Specification_of_the_UNIX_Filing_System" / "Specification_of_the_UNIX_Filing_System.md"
+        if not fixture.exists():
+            # `output/` is gitignored, so this fixture only exists on machines that
+            # already converted that book; skip instead of failing a clean checkout.
+            self.skipTest(f"missing local fixture: {fixture}")
         source = fixture.read_text(encoding="utf-8")
 
         blocks = parse_blocks(source)

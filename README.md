@@ -35,7 +35,13 @@ export MINERU_API_KEY="your_mineru_api_key"
 
 ## Run From Anywhere
 
-可以，只要调用仓库根目录下的 `yaet` 包装脚本即可。它会自动定位仓库内的 `src/` 和 `.venv/`，并且现在也会自动回退读取仓库根目录下的 `.env`。
+可以，只要调用仓库根目录下的 `yaet` 包装脚本即可。它会自动定位仓库内的 `src/` 和 `.venv/`，`.env` 则按下面的顺序查找：
+
+1. 当前工作目录下的 `.env`
+2. 仓库根目录下的 `.env`
+3. 家目录下的 `~/.env`
+
+`MINERU_API_KEY` 与 `DEEPSEEK_API_KEY` 都走这套逻辑，所以把 key 放在家目录即可在任意目录下复用。
 
 直接使用绝对路径：
 

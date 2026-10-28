@@ -220,6 +220,73 @@ class PdfToMarkdownTests(unittest.TestCase):
         self.assertIn("| Group | A | 1 |", normalized)
         self.assertNotIn("<table", normalized)
 
+    def test_normalize_pdf_markdown_uses_chinese_sections_as_top_level(self):
+        module = load_module()
+
+        markdown = (
+            "## 一、学位论文进展情况\n\n"
+            "## 1.1 学位论文进展情况\n\n"
+            "#### 1.1.1 研究背景\n\n"
+            "## 二、下一步工作计划\n\n"
+            "## 1. 下一步工作计划和内容\n\n"
+            "## 2. 预计答辩时间\n"
+        )
+
+        normalized = module.normalize_pdf_markdown(markdown)
+
+        self.assertIn("## 一、学位论文进展情况", normalized)
+        # 一、/二、 sit at level 2, so 1.1 and 1. are both subsections (level 3)
+        self.assertIn("### 1.1 学位论文进展情况", normalized)
+        self.assertIn("#### 1.1.1 研究背景", normalized)
+        self.assertIn("## 二、下一步工作计划", normalized)
+        self.assertIn("### 1. 下一步工作计划和内容", normalized)
+        self.assertIn("### 2. 预计答辩时间", normalized)
+        self.assertNotIn("\n## 1. 下一步工作计划和内容", normalized)
+
+    def test_normalize_pdf_markdown_demotes_numbered_list_inside_a_section(self):
+        module = load_module()
+
+        markdown = (
+            "## 1. 学位论文进展情况\n\n"
+            "#### 1.2.2 前端代码设计还有很大优化空间\n\n"
+            "正文段落。\n\n"
+            "## 1. 基于模块层级的时钟门控插入\n\n"
+            "正文段落。\n\n"
+            "## 2. 替换不必要复位的寄存器\n\n"
+            "正文段落。\n\n"
+            "### 1.3 下一步工作计划\n"
+        )
+
+        normalized = module.normalize_pdf_markdown(markdown)
+
+        # 1.3 keeps the previous chapter open, so the bare "1."/"2." are list items
+        self.assertIn("\n1. 基于模块层级的时钟门控插入\n", "\n" + normalized)
+        self.assertIn("\n2. 替换不必要复位的寄存器\n", "\n" + normalized)
+        self.assertNotIn("## 1. 基于模块层级", normalized)
+        self.assertNotIn("## 2. 替换不必要复位", normalized)
+        self.assertIn("## 1. 学位论文进展情况", normalized)
+        self.assertIn("### 1.3 下一步工作计划", normalized)
+
+    def test_normalize_pdf_markdown_keeps_real_sections_with_children(self):
+        module = load_module()
+
+        markdown = (
+            "## 1. 学位论文进展情况\n\n"
+            "### 1.1 学位论文进展情况\n\n"
+            "### 1.3 已取得阶段性成果\n\n"
+            "正文段落。\n\n"
+            "## 2. 下一步工作计划\n\n"
+            "### 2.1 工作计划\n\n"
+            "## 3. 参考文献\n"
+        )
+
+        normalized = module.normalize_pdf_markdown(markdown)
+
+        self.assertIn("## 2. 下一步工作计划", normalized)
+        self.assertIn("### 2.1 工作计划", normalized)
+        self.assertIn("## 3. 参考文献", normalized)
+
+
 
 if __name__ == "__main__":
     unittest.main()
