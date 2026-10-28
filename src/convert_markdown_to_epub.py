@@ -267,8 +267,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build an EPUB from bilingual Markdown.")
     parser.add_argument("input_path", nargs="?", default="The_society_of_mind.bilingual.md")
     parser.add_argument("-o", "--output", dest="output_path")
-    parser.add_argument("--title", default="The Society of Mind (Bilingual)")
-    parser.add_argument("--author", default="Marvin Minsky")
+    parser.add_argument("--title", default=None)
+    parser.add_argument("--author", default="Unknown Author")
     return parser.parse_args(argv)
 
 
@@ -280,7 +280,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.output_path
         else book_output_dir(input_path) / f"{sanitize_book_dir_name(canonical_book_name(input_path))}.bilingual.epub"
     )
-    write_epub(input_path, output_path, title=args.title, author=args.author)
+    write_epub(input_path, output_path, title=args.title or canonical_book_name(input_path), author=args.author)
     return 0
 
 

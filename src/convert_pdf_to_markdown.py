@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import html
 import io
 import os
 import re
 import time
 import zipfile
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Sequence
@@ -25,6 +27,26 @@ DEFAULT_LANGUAGE = "ch"
 DEFAULT_TIMEOUT = 600
 DEFAULT_POLL_INTERVAL = 5
 IMAGE_REFERENCE_PATTERN = re.compile(r"(!\[[^\]]*\]\()images/([^)]+)\)")
+IMAGE_SUFFIXES = {
+    ".avif",
+    ".bmp",
+    ".emf",
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".svg",
+    ".tif",
+    ".tiff",
+    ".webp",
+    ".wmf",
+}
+HEADING_PATTERN = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<title>\S.*)$")
+SECTION_NUMBER_PATTERN = re.compile(r"^(?P<number>\d+(?:\.\d+)*)\.?(?:\s+|$)(?P<title>.*)$")
+BODY_HEADING_ENDING_PATTERN = re.compile(r"[:：。！？!?；;，,]\s*$")
+HTML_TABLE_PATTERN = re.compile(r"<table\b[^>]*>.*?</table>", re.IGNORECASE | re.DOTALL)
+MAX_BODY_HEADING_LENGTH = 80
+CODE_FENCE_PREFIXES = ("```", "~~~")
 
 
 def load_mineru_api_key(env_path: Path | None = None) -> str | None:
@@ -46,6 +68,8 @@ def convert_pdf_to_markdown(
     timeout: int = DEFAULT_TIMEOUT,
     poll_interval: int = DEFAULT_POLL_INTERVAL,
 ) -> None:
+    if not input_path.is_file():
+        raise FileNotFoundError(f"Input PDF not found: {input_path}")
     _ensure_requests_available()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     data_id = input_path.stem
@@ -100,7 +124,7 @@ def convert_pdf_to_markdown(
             markdown = _download_cloud_result(item, output_path)
             if not markdown:
                 raise RuntimeError("MinerU cloud result did not contain Markdown output")
-            output_path.write_text(markdown, encoding="utf-8")
+            output_path.write_text(normalize_pdf_markdown(markdown), encoding="utf-8")
             return
 
     raise RuntimeError(f"MinerU cloud parsing timed out after {timeout}s")
@@ -156,9 +180,17 @@ def _extract_zip_markdown(zip_bytes: bytes, output_path: Path) -> str | None:
             if name.endswith(".md") and markdown is None:
                 markdown = archive.read(name).decode("utf-8")
                 continue
+            if Path(name).suffix.lower() not in IMAGE_SUFFIXES:
+                continue
             parts = Path(name).parts
+            if any(part in {"", ".", ".."} for part in parts):
+                continue
             filename = parts[-1]
-            target_path = asset_dir / filename if "images" in parts else asset_dir / filename
+            if "images" in parts:
+                relative_path = Path(*parts[parts.index("images") + 1 :])
+            else:
+                relative_path = Path(filename)
+            target_path = asset_dir / relative_path
             target_path.parent.mkdir(parents=True, exist_ok=True)
             target_path.write_bytes(archive.read(name))
 
@@ -167,6 +199,234 @@ def _extract_zip_markdown(zip_bytes: bytes, output_path: Path) -> str | None:
 
     asset_dir_name = asset_dir.name
     return IMAGE_REFERENCE_PATTERN.sub(rf"\1{asset_dir_name}/\2)", markdown)
+
+
+def normalize_pdf_markdown(markdown: str) -> str:
+    trailing_newline = markdown.endswith("\n")
+    normalized = _convert_html_tables(markdown)
+    normalized = _normalize_pdf_headings(normalized)
+    if trailing_newline and not normalized.endswith("\n"):
+        return normalized + "\n"
+    return normalized
+
+
+def _convert_html_tables(markdown: str) -> str:
+    lines = markdown.splitlines()
+    converted: list[str] = []
+    in_code_fence = False
+    index = 0
+
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+        if stripped.startswith(CODE_FENCE_PREFIXES):
+            in_code_fence = not in_code_fence
+            converted.append(line)
+            index += 1
+            continue
+
+        if not in_code_fence and re.search(r"<table\b", line, re.IGNORECASE):
+            table_lines = [line]
+            while "</table>" not in table_lines[-1].lower() and index + 1 < len(lines):
+                index += 1
+                table_lines.append(lines[index])
+            table_block = "\n".join(table_lines)
+            converted.append(HTML_TABLE_PATTERN.sub(lambda match: _html_table_to_pipe_table(match.group(0)), table_block))
+            index += 1
+            continue
+
+        converted.append(line)
+        index += 1
+
+    return "\n".join(converted)
+
+
+class _HtmlTableParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.rows: list[list[dict]] = []
+        self._row: list[dict] = []
+        self._cell: dict | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag == "tr":
+            self._row = []
+        elif tag in {"td", "th"}:
+            attributes = dict(attrs)
+            self._cell = {
+                "text": [],
+                "header": tag == "th",
+                "rowspan": _positive_int(attributes.get("rowspan")),
+                "colspan": _positive_int(attributes.get("colspan")),
+            }
+        elif tag == "br" and self._cell is not None:
+            self._cell["text"].append(" ")
+
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            self._cell["text"].append(data)
+
+    def handle_entityref(self, name: str) -> None:
+        if self._cell is not None:
+            self._cell["text"].append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        if self._cell is not None:
+            self._cell["text"].append(f"&#{name};")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in {"td", "th"} and self._cell is not None:
+            self._row.append(self._cell)
+            self._cell = None
+        elif tag == "tr" and self._row:
+            self.rows.append(self._row)
+            self._row = []
+
+
+def _positive_int(value: str | None) -> int:
+    try:
+        parsed = int(value or "1")
+    except ValueError:
+        return 1
+    return max(parsed, 1)
+
+
+def _html_table_to_pipe_table(table_html: str) -> str:
+    parser = _HtmlTableParser()
+    parser.feed(table_html)
+    parser.close()
+    if parser._row:
+        parser.rows.append(parser._row)
+    if not parser.rows:
+        return table_html
+
+    grid = _table_rows_to_grid(parser.rows)
+    if not grid:
+        return table_html
+
+    width = max(len(row) for row in grid)
+    grid = [row + [""] * (width - len(row)) for row in grid]
+    header = grid[0]
+    body = grid[1:]
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join("---" for _ in header) + " |",
+    ]
+    lines.extend("| " + " | ".join(row) + " |" for row in body)
+    return "\n".join(lines)
+
+
+def _table_rows_to_grid(rows: list[list[dict]]) -> list[list[str]]:
+    grid: list[list[str | None]] = []
+
+    for row_index, row in enumerate(rows):
+        while len(grid) <= row_index:
+            grid.append([])
+        column_index = 0
+        for cell in row:
+            while column_index < len(grid[row_index]) and grid[row_index][column_index] is not None:
+                column_index += 1
+            text = _clean_table_cell(cell["text"])
+            rowspan = cell["rowspan"]
+            colspan = cell["colspan"]
+            for row_offset in range(rowspan):
+                target_row_index = row_index + row_offset
+                while len(grid) <= target_row_index:
+                    grid.append([])
+                for column_offset in range(colspan):
+                    target_column_index = column_index + column_offset
+                    while len(grid[target_row_index]) <= target_column_index:
+                        grid[target_row_index].append(None)
+                    if grid[target_row_index][target_column_index] is None:
+                        grid[target_row_index][target_column_index] = text
+            column_index += colspan
+
+    return [[cell or "" for cell in row] for row in grid]
+
+
+def _clean_table_cell(chunks: Sequence[str]) -> str:
+    text = html.unescape("".join(chunks))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.replace("|", r"\|")
+
+
+def _normalize_pdf_headings(markdown: str) -> str:
+    lines = markdown.splitlines()
+    normalized: list[str] = []
+    in_code_fence = False
+    expect_numbered_list = False
+    in_numbered_list = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(CODE_FENCE_PREFIXES):
+            in_code_fence = not in_code_fence
+            normalized.append(line)
+            continue
+
+        if in_code_fence:
+            normalized.append(line)
+            continue
+
+        heading_match = HEADING_PATTERN.match(stripped)
+        if heading_match is None:
+            if stripped:
+                expect_numbered_list = _ends_with_intro_punctuation(stripped)
+                in_numbered_list = False
+            normalized.append(line)
+            continue
+
+        hashes = heading_match.group("hashes")
+        title = heading_match.group("title").strip()
+        if len(hashes) == 1:
+            in_numbered_list = False
+            normalized.append(line)
+            continue
+
+        section_match = SECTION_NUMBER_PATTERN.match(title)
+        if section_match is None:
+            if _looks_like_body_heading(title):
+                normalized.append(title)
+                expect_numbered_list = _ends_with_intro_punctuation(title)
+                in_numbered_list = False
+            else:
+                normalized.append(line)
+                in_numbered_list = False
+            continue
+
+        number = section_match.group("number")
+        if "." in number:
+            level = min(6, 2 + number.count("."))
+            normalized.append(f"{'#' * level} {title}")
+            expect_numbered_list = False
+            in_numbered_list = False
+            continue
+
+        if _looks_like_body_heading(title) or in_numbered_list or expect_numbered_list:
+            normalized.append(title)
+            in_numbered_list = True
+            expect_numbered_list = False
+            continue
+
+        normalized.append(f"## {title}")
+        in_numbered_list = False
+        expect_numbered_list = False
+
+    return "\n".join(normalized)
+
+
+def _ends_with_intro_punctuation(text: str) -> bool:
+    return bool(re.search(r"[:：]\s*$", text))
+
+
+def _looks_like_body_heading(title: str) -> bool:
+    if not title:
+        return False
+    if BODY_HEADING_ENDING_PATTERN.search(title):
+        return True
+    return len(title) > MAX_BODY_HEADING_LENGTH
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -187,6 +447,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.output_path
         else book_output_dir(input_path) / f"{sanitize_book_dir_name(canonical_book_name(input_path))}.md"
     )
+    if not input_path.is_file():
+        raise SystemExit(f"Input PDF not found: {input_path}")
     api_key = load_mineru_api_key()
     if not api_key:
         raise SystemExit("Missing MINERU_API_KEY; set the env var or add it to .env")

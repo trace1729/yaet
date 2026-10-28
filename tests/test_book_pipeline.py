@@ -215,6 +215,8 @@ class BookPipelineTests(unittest.TestCase):
                 output_epub_path.write_bytes(b"epub")
 
             with patch.object(module, "convert_pdf_to_markdown", side_effect=fake_convert_pdf_to_markdown), patch.object(
+                module, "load_mineru_api_key", return_value="mineru-key"
+            ), patch.object(
                 module, "load_api_key", return_value="secret"
             ), patch.object(module, "create_client", side_effect=fake_create_client), patch.object(
                 module, "run_translation_pipeline", side_effect=fake_run_translation_pipeline

@@ -415,6 +415,8 @@ class EpubExportTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(captured["input"], input_path)
         self.assertEqual(captured["output"], tmp_path / "output" / "book" / "book.bilingual.epub")
+        self.assertEqual(captured["title"], "book")
+        self.assertEqual(captured["author"], "Unknown Author")
 
     def test_translate_main_defaults_output_and_cache_to_book_directory(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -77,6 +77,9 @@ class PdfToMarkdownTests(unittest.TestCase):
             with zipfile.ZipFile(zip_buffer, "w") as archive:
                 archive.writestr("result.md", "# Title\n\n![](images/figure1.png)\n")
                 archive.writestr("images/figure1.png", b"png-bytes")
+                archive.writestr("paper_content_list.json", b"{}")
+                archive.writestr("paper_origin.pdf", b"%PDF-1.4\n")
+                archive.writestr("layout.json", b"{}")
 
             def fake_post(url, headers=None, json=None, timeout=None):
                 if url.endswith("/file-urls/batch"):
@@ -141,6 +144,81 @@ class PdfToMarkdownTests(unittest.TestCase):
             asset_path = output_path.with_name("paper_assets") / "figure1.png"
             self.assertTrue(asset_path.exists())
             self.assertIn("![](paper_assets/figure1.png)", markdown)
+            self.assertEqual(
+                sorted(path.name for path in asset_path.parent.iterdir()),
+                ["figure1.png"],
+            )
+
+    def test_convert_pdf_to_markdown_checks_input_before_network_request(self):
+        module = load_module()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            input_path = tmp_path / "missing.pdf"
+            output_path = tmp_path / "output" / "missing.md"
+
+            with patch.object(module.requests, "post") as post:
+                with self.assertRaises(FileNotFoundError):
+                    module.convert_pdf_to_markdown(input_path, output_path, api_key="mineru-key")
+
+            post.assert_not_called()
+
+    def test_normalize_pdf_markdown_restores_heading_hierarchy(self):
+        module = load_module()
+
+        markdown = "## 1. Introduction\n\n## 1.1 Overview\n\n## 1.1.1 Details\n"
+
+        normalized = module.normalize_pdf_markdown(markdown)
+
+        self.assertIn("## 1. Introduction", normalized)
+        self.assertIn("### 1.1 Overview", normalized)
+        self.assertIn("#### 1.1.1 Details", normalized)
+
+    def test_normalize_pdf_markdown_demotes_body_sentences_and_numbered_lists(self):
+        module = load_module()
+
+        markdown = (
+            "## 该预测器的具体预测策略如下：\n\n"
+            "## 1. 基于模块层级的时钟门控插入\n\n"
+            "## 2. 另一项策略\n"
+        )
+
+        normalized = module.normalize_pdf_markdown(markdown)
+
+        self.assertIn("\n该预测器的具体预测策略如下：\n", "\n" + normalized)
+        self.assertIn("\n1. 基于模块层级的时钟门控插入\n", "\n" + normalized)
+        self.assertIn("\n2. 另一项策略\n", "\n" + normalized)
+        self.assertNotIn("## 该预测器", normalized)
+        self.assertNotIn("## 1. 基于", normalized)
+
+    def test_normalize_pdf_markdown_converts_html_tables_to_pipe_tables(self):
+        module = load_module()
+
+        markdown = (
+            "<table><tr><th>Name</th><th>Value</th></tr>"
+            "<tr><td>A</td><td>1</td></tr></table>\n"
+        )
+
+        normalized = module.normalize_pdf_markdown(markdown)
+
+        self.assertIn("| Name | Value |", normalized)
+        self.assertIn("| --- | --- |", normalized)
+        self.assertIn("| A | 1 |", normalized)
+        self.assertNotIn("<table", normalized)
+
+    def test_normalize_pdf_markdown_expands_rowspan_and_colspan(self):
+        module = load_module()
+
+        markdown = (
+            '<table><tr><th rowspan="2">Group</th><th colspan="2">Values</th></tr>'
+            "<tr><td>A</td><td>1</td></tr></table>\n"
+        )
+
+        normalized = module.normalize_pdf_markdown(markdown)
+
+        self.assertIn("| Group | Values | Values |", normalized)
+        self.assertIn("| Group | A | 1 |", normalized)
+        self.assertNotIn("<table", normalized)
 
 
 if __name__ == "__main__":
