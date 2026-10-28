@@ -150,6 +150,73 @@ class TranslateCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(stdout.getvalue(), "Hello\n\n你好\n")
 
+    def test_main_reads_provider_and_prompt_options_from_config(self):
+        module = load_translate_cli_module(self)
+        client = Mock()
+        client.chat.completions.create.return_value = Mock(
+            choices=[Mock(message=Mock(content="你好"))]
+        )
+
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "yaet.yaml"
+            config_path.write_text(
+                "provider:\n"
+                "  base_url: https://example-proxy.test/v1\n"
+                "  api_key_env: MY_DEEPSEEK_KEY\n"
+                "  model: deepseek-reasoner\n"
+                "  temperature: 0.7\n"
+                "prompt:\n"
+                "  terms: \"面向体系结构研究\"\n"
+                "glossary:\n"
+                "  agent: 智能体\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"MY_DEEPSEEK_KEY": "config-key"}, clear=False):
+                with patch.object(module, "create_client", return_value=client) as create_client:
+                    with contextlib.redirect_stdout(stdout):
+                        exit_code = module.main(
+                            ["--config", str(config_path), "hello"],
+                            env_path=Path(tmp_dir) / "missing.env",
+                        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stdout.getvalue(), "你好\n")
+        create_client.assert_called_once_with("config-key", base_url="https://example-proxy.test/v1")
+        kwargs = client.chat.completions.create.call_args.kwargs
+        self.assertEqual(kwargs["model"], "deepseek-reasoner")
+        self.assertEqual(kwargs["temperature"], 0.7)
+        system_prompt = kwargs["messages"][0]["content"]
+        self.assertIn("面向体系结构研究", system_prompt)
+        self.assertIn("- agent -> 智能体", system_prompt)
+
+    def test_main_model_flag_overrides_config_model(self):
+        module = load_translate_cli_module(self)
+        client = Mock()
+        client.chat.completions.create.return_value = Mock(
+            choices=[Mock(message=Mock(content="你好"))]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "yaet.yaml"
+            config_path.write_text(
+                "provider:\n"
+                "  api_key_env: MY_DEEPSEEK_KEY\n"
+                "  model: deepseek-reasoner\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"MY_DEEPSEEK_KEY": "config-key"}, clear=False):
+                with patch.object(module, "create_client", return_value=client):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        exit_code = module.main(
+                            ["--config", str(config_path), "--model", "deepseek-chat", "hello"],
+                            env_path=Path(tmp_dir) / "missing.env",
+                        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(client.chat.completions.create.call_args.kwargs["model"], "deepseek-chat")
+
+
 
 if __name__ == "__main__":
     unittest.main()

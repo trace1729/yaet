@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+import yaet_config
 from translate_markdown_book import create_client, load_api_key
 
 
@@ -44,12 +45,28 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--input", dest="input_path", help="Path to a txt file for bilingual mode")
     parser.add_argument("-o", "--output", dest="output_path", help="Optional output path for bilingual mode")
     parser.add_argument("-v", "--verbose", action="store_true", help="Include pronunciation and an example sentence")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="DeepSeek model name")
+    parser.add_argument("--model", help="Model name; overrides provider.model from --config")
+    parser.add_argument("--config", help="Path to a yaet.yaml config file")
     return parser.parse_args(argv)
 
 
-def translate_text(client, text: str, model: str) -> str:
-    prompt = build_translation_prompt()
+def build_prompt_options(config) -> tuple[str, str, str]:
+    """Collect title/summary/terms (including glossary) for the prompt reference block."""
+    prompt_config = config.prompt
+    terms_parts = [prompt_config.terms.strip()]
+    glossary = dict(getattr(config, "glossary", {}) or {})
+    if glossary:
+        terms_parts.append("\n".join(f"- {english} -> {chinese}" for english, chinese in glossary.items()))
+    return prompt_config.title, prompt_config.summary, "\n".join(part for part in terms_parts if part)
+
+
+def translate_text(client, text: str, model: str, temperature: float = 0.2, prompt_options: tuple[str, str, str] | None = None) -> str:
+    title_prompt, summary_prompt, terms_prompt = prompt_options or ("", "", "")
+    prompt = build_translation_prompt(
+        title_prompt=title_prompt,
+        summary_prompt=summary_prompt,
+        terms_prompt=terms_prompt,
+    )
     response = client.chat.completions.create(
         model=model,
         messages=[
@@ -58,12 +75,12 @@ def translate_text(client, text: str, model: str) -> str:
                 "content": prompt.replace("{{text}}", text),
             },
         ],
-        temperature=0.2,
+        temperature=temperature,
     )
     return response.choices[0].message.content.strip()
 
 
-def translate_text_verbose(client, text: str, model: str) -> dict[str, str]:
+def translate_text_verbose(client, text: str, model: str, temperature: float = 0.2) -> dict[str, str]:
     response = client.chat.completions.create(
         model=model,
         messages=[
@@ -83,14 +100,20 @@ def translate_text_verbose(client, text: str, model: str) -> dict[str, str]:
                 ),
             },
         ],
-        temperature=0.2,
+        temperature=temperature,
         response_format={"type": "json_object"},
     )
     return parse_verbose_response(response.choices[0].message.content)
 
 
-def translate_text_bilingual(client, text: str, model: str) -> str:
-    translation = translate_text(client, text, model)
+def translate_text_bilingual(
+    client,
+    text: str,
+    model: str,
+    temperature: float = 0.2,
+    prompt_options: tuple[str, str, str] | None = None,
+) -> str:
+    translation = translate_text(client, text, model, temperature=temperature, prompt_options=prompt_options)
     return f"{text.strip()}\n\n{translation}"
 
 
@@ -124,21 +147,36 @@ def resolve_input_text(args: argparse.Namespace) -> str:
     return sys.stdin.read()
 
 
-def main(argv: Sequence[str] | None = None, env_path: Path | None = None) -> int:
+def main(argv: Sequence[str] | None = None, env_path: Path | None = None, config=None) -> int:
     args = parse_args(argv)
-    api_key = load_api_key(env_path)
+    if config is None:
+        config = yaet_config.load_config(getattr(args, "config", None))
+    provider = config.provider
+    model = args.model or provider.model or DEFAULT_MODEL
+    prompt_options = build_prompt_options(config)
+
+    api_key = provider.api_key or load_api_key(env_path, env_var=provider.api_key_env)
     if not api_key:
-        print("Missing DEEPSEEK_API_KEY. Set it in the environment or .env.", file=sys.stderr)
+        print(
+            f"Missing {provider.api_key_env}. Set it in the environment or .env.",
+            file=sys.stderr,
+        )
         return 1
 
     try:
-        client = create_client(api_key)
+        client = create_client(api_key, base_url=provider.base_url)
         if args.bilingual:
             raw_text = resolve_input_text(args)
             if not raw_text.strip():
                 print("Bilingual mode requires input text, --input, or stdin.", file=sys.stderr)
                 return 1
-            bilingual_text = translate_text_bilingual(client, raw_text, model=args.model)
+            bilingual_text = translate_text_bilingual(
+                client,
+                raw_text,
+                model=model,
+                temperature=provider.temperature,
+                prompt_options=prompt_options,
+            )
             if args.output_path:
                 Path(args.output_path).write_text(f"{bilingual_text}\n", encoding="utf-8")
             else:
@@ -147,13 +185,21 @@ def main(argv: Sequence[str] | None = None, env_path: Path | None = None) -> int
             if not args.text:
                 print("Missing input text.", file=sys.stderr)
                 return 1
-            payload = translate_text_verbose(client, args.text, model=args.model)
+            payload = translate_text_verbose(client, args.text, model=model, temperature=provider.temperature)
             print(format_verbose_output(payload))
         else:
             if not args.text:
                 print("Missing input text.", file=sys.stderr)
                 return 1
-            print(translate_text(client, args.text, model=args.model))
+            print(
+                translate_text(
+                    client,
+                    args.text,
+                    model=model,
+                    temperature=provider.temperature,
+                    prompt_options=prompt_options,
+                )
+            )
     except Exception as error:
         print(f"Translation failed: {error}", file=sys.stderr)
         return 1

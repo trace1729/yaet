@@ -306,6 +306,11 @@ output/<book>/<book>.translation_cache.json
 ./yaet translate --verbose "Hello world"
 ./yaet translate --bilingual --input notes.txt --output notes.bilingual.txt
 cat notes.txt | ./yaet translate --bilingual
+
+# 复用 yaet.yaml：provider（base_url / api_key_env / model / temperature）、
+# prompt.terms、glossary 都会生效；--model 优先于配置
+./yaet translate "The agent replays a trace." --config yaet.yaml
+./yaet translate --config yaet.yaml --model deepseek-reasoner "Hello"
 ```
 
 兼容的旧入口仍然可用：
